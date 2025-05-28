@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# CTF VM Security Hardening Script
+# CTF VM Security Hardening Script with Custom Port/Service Protection
 # For CyberEDU Competition Environment
 # WARNING: Test this script in a safe environment first!
 
@@ -15,12 +15,98 @@ SSH_PORT="2222"  # Change from default 22
 MAX_AUTH_TRIES="3"
 LOGIN_GRACE_TIME="60"
 
+# CUSTOM PORT/SERVICE PROTECTION ARRAYS
+# Edit these arrays to specify what should remain accessible
+PROTECTED_TCP_PORTS=()      # e.g., ("80" "443" "8080" "3000")
+PROTECTED_UDP_PORTS=()      # e.g., ("53" "123")
+PROTECTED_SERVICES=()       # e.g., ("apache2" "nginx" "mysql" "postgresql")
+PROTECTED_PACKAGES=()       # e.g., ("apache2" "nginx" "mysql-server")
+
+# Blue team networks that should have full access (CIDR format)
+BLUE_TEAM_NETWORKS=("10.11.158.0/24")  # Add your networks here
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+# Function to prompt for custom configuration
+configure_protection() {
+    print_status "$BLUE" "=== Custom Port/Service Protection Configuration ==="
+    
+    read -p "Do you want to configure custom ports/services to protect? (y/N): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        
+        # Configure TCP ports
+        echo "Enter TCP ports to keep open (space-separated, e.g., 80 443 8080):"
+        read -r tcp_input
+        if [[ -n "$tcp_input" ]]; then
+            IFS=' ' read -ra PROTECTED_TCP_PORTS <<< "$tcp_input"
+        fi
+        
+        # Configure UDP ports
+        echo "Enter UDP ports to keep open (space-separated, e.g., 53 123):"
+        read -r udp_input
+        if [[ -n "$udp_input" ]]; then
+            IFS=' ' read -ra PROTECTED_UDP_PORTS <<< "$udp_input"
+        fi
+        
+        # Configure services
+        echo "Enter services to protect from interference (space-separated, e.g., apache2 nginx mysql):"
+        read -r services_input
+        if [[ -n "$services_input" ]]; then
+            IFS=' ' read -ra PROTECTED_SERVICES <<< "$services_input"
+        fi
+        
+        # Configure packages
+        echo "Enter packages to protect from removal (space-separated, e.g., apache2 nginx mysql-server):"
+        read -r packages_input
+        if [[ -n "$packages_input" ]]; then
+            IFS=' ' read -ra PROTECTED_PACKAGES <<< "$packages_input"
+        fi
+        
+        # Configure blue team networks
+        echo "Enter blue team networks with full access (space-separated CIDR, e.g., 10.0.0.0/24 192.168.1.0/24):"
+        read -r networks_input
+        if [[ -n "$networks_input" ]]; then
+            IFS=' ' read -ra BLUE_TEAM_NETWORKS <<< "$networks_input"
+        fi
+        
+        # Display configuration
+        print_status "$GREEN" "Protection Configuration:"
+        echo "Protected TCP ports: ${PROTECTED_TCP_PORTS[*]:-none}"
+        echo "Protected UDP ports: ${PROTECTED_UDP_PORTS[*]:-none}"
+        echo "Protected services: ${PROTECTED_SERVICES[*]:-none}"
+        echo "Protected packages: ${PROTECTED_PACKAGES[*]:-none}"
+        echo "Blue team networks: ${BLUE_TEAM_NETWORKS[*]:-none}"
+        echo
+    fi
+}
+
+# Function to check if a service is protected
+is_service_protected() {
+    local service="$1"
+    for protected in "${PROTECTED_SERVICES[@]}"; do
+        if [[ "$service" == "$protected" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Function to check if a package is protected
+is_package_protected() {
+    local package="$1"
+    for protected in "${PROTECTED_PACKAGES[@]}"; do
+        if [[ "$package" == "$protected" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
 
 # Logging function
 log() {
@@ -205,9 +291,9 @@ EOF
     fi
 }
 
-# Configure firewall with UFW
+# Configure firewall with UFW (now with custom port protection)
 configure_firewall() {
-    log_info "Configuring UFW firewall..."
+    log_info "Configuring UFW firewall with custom port protection..."
     
     # Reset UFW to defaults
     ufw --force reset
@@ -219,12 +305,23 @@ configure_firewall() {
     # Allow SSH on new port
     ufw allow $SSH_PORT/tcp comment 'SSH'
     
-    # Allow common web services (adjust based on your needs)
-    ufw allow 80/tcp comment 'HTTP'
-    ufw allow 443/tcp comment 'HTTPS'
+    # Allow protected TCP ports
+    for port in "${PROTECTED_TCP_PORTS[@]}"; do
+        ufw allow $port/tcp comment "Protected TCP port $port"
+        log_info "Allowed protected TCP port: $port"
+    done
     
-    # Allow from your blue team network
-    ufw allow from 10.11.158.0/24 comment 'Blue team network'
+    # Allow protected UDP ports
+    for port in "${PROTECTED_UDP_PORTS[@]}"; do
+        ufw allow $port/udp comment "Protected UDP port $port"
+        log_info "Allowed protected UDP port: $port"
+    done
+    
+    # Allow from blue team networks
+    for network in "${BLUE_TEAM_NETWORKS[@]}"; do
+        ufw allow from $network comment "Blue team network $network"
+        log_info "Allowed full access from blue team network: $network"
+    done
     
     # Rate limiting for SSH
     ufw limit $SSH_PORT/tcp
@@ -232,12 +329,12 @@ configure_firewall() {
     # Enable UFW
     ufw --force enable
     
-    log_success "UFW firewall configured and enabled"
+    log_success "UFW firewall configured and enabled with custom protections"
 }
 
-# Configure fail2ban
+# Configure fail2ban (updated to work with custom ports)
 configure_fail2ban() {
-    log_info "Configuring fail2ban..."
+    log_info "Configuring fail2ban with custom port awareness..."
     
     cat > /etc/fail2ban/jail.local << EOF
 [DEFAULT]
@@ -249,6 +346,8 @@ findtime = 600
 maxretry = 3
 # Backend
 backend = auto
+# Ignore blue team networks
+ignoreip = 127.0.0.1/8 ::1 ${BLUE_TEAM_NETWORKS[*]}
 
 [sshd]
 enabled = true
@@ -281,12 +380,24 @@ enabled = true
 filter = apache-overflows
 logpath = /var/log/apache2/access.log
 maxretry = 2
+
+[nginx-http-auth]
+enabled = true
+filter = nginx-http-auth
+logpath = /var/log/nginx/error.log
+maxretry = 6
+
+[nginx-noscript]
+enabled = true
+filter = nginx-noscript
+logpath = /var/log/nginx/access.log
+maxretry = 6
 EOF
     
     systemctl enable fail2ban
     systemctl restart fail2ban
     
-    log_success "Fail2ban configured and started"
+    log_success "Fail2ban configured and started with blue team network protection"
 }
 
 # Kernel hardening
@@ -486,9 +597,9 @@ EOF
     log_success "Logging configured"
 }
 
-# Remove unnecessary packages and services
+# Remove unnecessary packages and services (with protection)
 remove_unnecessary() {
-    log_info "Removing unnecessary packages and services..."
+    log_info "Removing unnecessary packages and services (with protections)..."
     
     # Potentially unnecessary packages (be careful!)
     local packages_to_remove=(
@@ -501,11 +612,16 @@ remove_unnecessary() {
     
     if command -v apt-get &> /dev/null; then
         for package in "${packages_to_remove[@]}"; do
-            apt-get remove -y -qq "$package" 2>/dev/null || true
+            if ! is_package_protected "$package"; then
+                apt-get remove -y -qq "$package" 2>/dev/null || true
+                log_info "Removed package: $package"
+            else
+                log_info "Skipped protected package: $package"
+            fi
         done
     fi
     
-    # Disable unnecessary services
+    # Disable unnecessary services (with protection)
     local services_to_disable=(
         "avahi-daemon"
         "cups"
@@ -513,32 +629,67 @@ remove_unnecessary() {
     )
     
     for service in "${services_to_disable[@]}"; do
-        systemctl disable "$service" 2>/dev/null || true
-        systemctl stop "$service" 2>/dev/null || true
+        if ! is_service_protected "$service"; then
+            systemctl disable "$service" 2>/dev/null || true
+            systemctl stop "$service" 2>/dev/null || true
+            log_info "Disabled service: $service"
+        else
+            log_info "Skipped protected service: $service"
+        fi
     done
     
-    log_success "Unnecessary packages and services removed/disabled"
+    log_success "Unnecessary packages and services removed/disabled (with protections applied)"
 }
 
-# Setup monitoring scripts
+# Setup monitoring scripts (enhanced with port awareness)
 setup_monitoring() {
-    log_info "Setting up monitoring scripts..."
+    log_info "Setting up monitoring scripts with custom port awareness..."
     
     # Create monitoring directory
     mkdir -p /opt/ctf-monitoring
     
-    # Network monitoring script
-    cat > /opt/ctf-monitoring/network-monitor.sh << 'EOF'
+    # Create port exclusion list for monitoring
+    local excluded_ports="${PROTECTED_TCP_PORTS[*]} ${PROTECTED_UDP_PORTS[*]} $SSH_PORT"
+    
+    # Network monitoring script with port protection
+    cat > /opt/ctf-monitoring/network-monitor.sh << EOF
 #!/bin/bash
-# Network monitoring script
+# Network monitoring script with port protection
 LOG_FILE="/var/log/network-monitor.log"
 THRESHOLD=100  # Max connections per IP
+BLUE_TEAM_NETWORKS=(${BLUE_TEAM_NETWORKS[*]})
+PROTECTED_PORTS=($excluded_ports)
 
-netstat -ntu | awk '{print $5}' | cut -d: -f1 | sort | uniq -c | sort -nr | while read count ip; do
-    if [[ $count -gt $THRESHOLD ]] && [[ $ip != "127.0.0.1" ]] && [[ $ip != "" ]]; then
-        echo "$(date): Suspicious activity from $ip: $count connections" >> $LOG_FILE
-        # Optionally block IP
-        # ufw deny from $ip
+# Function to check if IP is in blue team network
+is_blue_team_ip() {
+    local ip="\$1"
+    for network in "\${BLUE_TEAM_NETWORKS[@]}"; do
+        if [[ "\$network" == *"/"* ]]; then
+            # CIDR notation - simplified check (you might want to use more sophisticated IP matching)
+            local network_base=\$(echo "\$network" | cut -d'/' -f1)
+            local network_prefix=\$(echo "\$network_base" | cut -d'.' -f1-3)
+            local ip_prefix=\$(echo "\$ip" | cut -d'.' -f1-3)
+            if [[ "\$ip_prefix" == "\$network_prefix" ]]; then
+                return 0
+            fi
+        else
+            if [[ "\$ip" == "\$network" ]]; then
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+netstat -ntu | awk '{print \$5}' | cut -d: -f1 | sort | uniq -c | sort -nr | while read count ip; do
+    if [[ \$count -gt \$THRESHOLD ]] && [[ \$ip != "127.0.0.1" ]] && [[ \$ip != "" ]]; then
+        if ! is_blue_team_ip "\$ip"; then
+            echo "\$(date): Suspicious activity from \$ip: \$count connections" >> \$LOG_FILE
+            # Optionally block IP (uncomment next line)
+            # ufw deny from \$ip
+        else
+            echo "\$(date): High activity from blue team IP \$ip: \$count connections (allowed)" >> \$LOG_FILE
+        fi
     fi
 done
 EOF
@@ -574,22 +725,35 @@ EOF
     (crontab -l 2>/dev/null; echo "*/5 * * * * /opt/ctf-monitoring/network-monitor.sh") | crontab -
     (crontab -l 2>/dev/null; echo "*/10 * * * * /opt/ctf-monitoring/resource-monitor.sh") | crontab -
     
-    log_success "Monitoring scripts setup completed"
+    log_success "Monitoring scripts setup completed with custom port protections"
 }
 
-# Create incident response script
+# Create incident response script (enhanced)
 create_incident_response() {
-    log_info "Creating incident response script..."
+    log_info "Creating enhanced incident response script..."
     
     cat > /opt/ctf-monitoring/incident-response.sh << EOF
 #!/bin/bash
-# Incident Response Script
+# Enhanced Incident Response Script with Protection Awareness
 
 BACKUP_DIR="$BACKUP_DIR"
 LOG_FILE="/var/log/incident-response.log"
+PROTECTED_SERVICES=(${PROTECTED_SERVICES[*]})
+BLUE_TEAM_NETWORKS=(${BLUE_TEAM_NETWORKS[*]})
 
 log() {
     echo "\$(date): \$1" | tee -a \$LOG_FILE
+}
+
+# Function to check if service is protected
+is_service_protected() {
+    local service="\$1"
+    for protected in "\${PROTECTED_SERVICES[@]}"; do
+        if [[ "\$service" == "\$protected" ]]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Function to restore from backup
@@ -605,21 +769,59 @@ restore_config() {
     fi
 }
 
-# Function to block suspicious IPs
+# Function to block suspicious IPs (with blue team protection)
 block_ip() {
     local ip="\$1"
+    
+    # Check if IP is in blue team networks
+    for network in "\${BLUE_TEAM_NETWORKS[@]}"; do
+        if [[ "\$network" == *"/"* ]]; then
+            local network_base=\$(echo "\$network" | cut -d'/' -f1)
+            local network_prefix=\$(echo "\$network_base" | cut -d'.' -f1-3)
+            local ip_prefix=\$(echo "\$ip" | cut -d'.' -f1-3)
+            if [[ "\$ip_prefix" == "\$network_prefix" ]]; then
+                log "WARNING: Attempted to block blue team IP \$ip - BLOCKED"
+                return 1
+            fi
+        fi
+    done
+    
     ufw deny from "\$ip"
     log "Blocked IP: \$ip"
 }
 
-# Function to restart critical services
+# Function to restart critical services (with protection)
 restart_services() {
     local services=("sshd" "fail2ban" "ufw")
     
     for service in "\${services[@]}"; do
-        systemctl restart "\$service"
-        log "Restarted service: \$service"
+        if ! is_service_protected "\$service"; then
+            systemctl restart "\$service"
+            log "Restarted service: \$service"
+        else
+            log "Skipped protected service: \$service"
+        fi
     done
+    
+    # Restart protected services separately with confirmation
+    for service in "\${PROTECTED_SERVICES[@]}"; do
+        echo -n "Restart protected service \$service? (y/N): "
+        read -r response
+        if [[ "\$response" =~ ^[Yy]$ ]]; then
+            systemctl restart "\$service"
+            log "Restarted protected service: \$service (manual confirmation)"
+        fi
+    done
+}
+
+# Function to show protection status
+show_protection_status() {
+    echo "=== PROTECTION STATUS ==="
+    echo "Protected TCP Ports: ${PROTECTED_TCP_PORTS[*]:-none}"
+    echo "Protected UDP Ports: ${PROTECTED_UDP_PORTS[*]:-none}"
+    echo "Protected Services: \${PROTECTED_SERVICES[*]:-none}"
+    echo "Blue Team Networks: \${BLUE_TEAM_NETWORKS[*]:-none}"
+    echo "=========================="
 }
 
 case "\$1" in
@@ -633,28 +835,39 @@ case "\$1" in
     restart-all)
         restart_services
         ;;
+    status)
+        show_protection_status
+        ;;
     *)
-        echo "Usage: \$0 {restore-ssh|block-ip <ip>|restart-all}"
+        echo "Usage: \$0 {restore-ssh|block-ip <ip>|restart-all|status}"
         exit 1
         ;;
 esac
 EOF
     
     chmod +x /opt/ctf-monitoring/incident-response.sh
-    log_success "Incident response script created"
+    log_success "Enhanced incident response script created"
 }
 
-# Generate security report
+# Generate security report (enhanced)
 generate_report() {
-    log_info "Generating security report..."
+    log_info "Generating enhanced security report..."
     
     local report_file="/root/ctf_security_report_$(date +%Y%m%d_%H%M%S).txt"
     
     cat > "$report_file" << EOF
-CTF VM Security Hardening Report
+CTF VM Security Hardening Report (Enhanced with Custom Protections)
 Generated: $(date)
 Hostname: $(hostname)
 IP Address: $(hostname -I | awk '{print $1}')
+
+=== CUSTOM PROTECTION CONFIGURATION ===
+
+Protected TCP Ports: ${PROTECTED_TCP_PORTS[*]:-none}
+Protected UDP Ports: ${PROTECTED_UDP_PORTS[*]:-none}
+Protected Services: ${PROTECTED_SERVICES[*]:-none}
+Protected Packages: ${PROTECTED_PACKAGES[*]:-none}
+Blue Team Networks: ${BLUE_TEAM_NETWORKS[*]:-none}
 
 === APPLIED SECURITY MEASURES ===
 
@@ -668,36 +881,60 @@ IP Address: $(hostname -I | awk '{print $1}')
 2. Firewall Configuration:
    - UFW enabled with restrictive rules
    - SSH rate limiting enabled
-   - Only necessary ports opened
+   - Custom protected ports allowed:
+$(for port in "${PROTECTED_TCP_PORTS[@]}"; do echo "     * TCP/$port"; done)
+$(for port in "${PROTECTED_UDP_PORTS[@]}"; do echo "     * UDP/$port"; done)
+   - Blue team networks have full access
 
 3. Fail2ban:
    - Configured for SSH protection
    - Web service protection enabled
+   - Blue team networks whitelisted
    - Custom ban times and retry limits
 
 4. System Hardening:
    - Kernel security parameters applied
    - File permissions secured
-   - Unnecessary services disabled
+   - Unnecessary services disabled (with protections)
    - User accounts secured
 
 5. Monitoring:
    - Auditd configured for system monitoring
    - AIDE file integrity monitoring
-   - Custom network and resource monitoring
+   - Custom network and resource monitoring with blue team awareness
    - Enhanced logging configured
 
-6. Backup:
+6. Service Protection:
+   - Protected services will not be stopped/disabled:
+$(for service in "${PROTECTED_SERVICES[@]}"; do echo "     * $service"; done)
+   - Protected packages will not be removed:
+$(for package in "${PROTECTED_PACKAGES[@]}"; do echo "     * $package"; done)
+
+7. Backup:
    - Configuration files backed up to: $BACKUP_DIR
-   - Incident response procedures documented
+   - Enhanced incident response procedures documented
 
 === IMPORTANT NOTES ===
 
 - The 'cyberedu' user has been preserved as required
 - SSH is now available on port $SSH_PORT
+- Custom ports and services are protected from interference
+- Blue team networks have unrestricted access
 - All changes are logged in: $LOG_FILE
 - Backups are stored in: $BACKUP_DIR
-- Monitoring scripts located in: /opt/ctf-monitoring
+- Enhanced monitoring scripts located in: /opt/ctf-monitoring
+
+=== FIREWALL STATUS ===
+$(ufw status verbose 2>/dev/null || echo "UFW status unavailable")
+
+=== PROTECTED SERVICES STATUS ===
+$(for service in "${PROTECTED_SERVICES[@]}"; do
+    if systemctl is-active --quiet "$service" 2>/dev/null; then
+        echo "$service: RUNNING"
+    else
+        echo "$service: NOT RUNNING"
+    fi
+done)
 
 === NEXT STEPS ===
 
@@ -706,27 +943,45 @@ IP Address: $(hostname -I | awk '{print $1}')
 3. Review firewall rules: ufw status verbose
 4. Check fail2ban status: fail2ban-client status
 5. Monitor system: /opt/ctf-monitoring/resource-monitor.sh
+6. Check protection status: /opt/ctf-monitoring/incident-response.sh status
+7. Test protected services and ports
+8. Verify blue team access from allowed networks
+
+=== QUICK COMMANDS ===
+
+- Check protection status: /opt/ctf-monitoring/incident-response.sh status
+- Block an IP: /opt/ctf-monitoring/incident-response.sh block-ip <IP>
+- Restart services: /opt/ctf-monitoring/incident-response.sh restart-all
+- Restore SSH config: /opt/ctf-monitoring/incident-response.sh restore-ssh
+- View recent security events: tail -100 $LOG_FILE
+- Check firewall status: ufw status verbose
+- Monitor network activity: tail -f /var/log/network-monitor.log
 
 EOF
     
-    log_success "Security report generated: $report_file"
+    log_success "Enhanced security report generated: $report_file"
     cat "$report_file"
 }
 
 # Main execution function
 main() {
-    print_status "$BLUE" "=== CTF VM Security Hardening Script ==="
+    print_status "$BLUE" "=== CTF VM Security Hardening Script (Enhanced) ==="
+    print_status "$YELLOW" "This version allows you to protect specific ports and services from interference!"
     print_status "$YELLOW" "WARNING: This script will make significant changes to your system!"
     print_status "$YELLOW" "Make sure you have console access in case SSH becomes unavailable."
     
-    read -p "Do you want to continue? (y/N): " -n 1 -r
+    # Configure custom protections first
+    configure_protection
+    
+    echo
+    read -p "Do you want to continue with hardening? (y/N): " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         log_info "Script cancelled by user"
         exit 0
     fi
     
-    log_info "Starting CTF VM security hardening..."
+    log_info "Starting CTF VM security hardening with custom protections..."
     
     # Execute hardening steps
     check_root
@@ -753,7 +1008,31 @@ main() {
     print_status "$YELLOW" "IMPORTANT: Password authentication is disabled"
     print_status "$YELLOW" "IMPORTANT: Make sure you have SSH keys configured!"
     
-    log_success "CTF VM security hardening completed"
+    if [[ ${#PROTECTED_TCP_PORTS[@]} -gt 0 ]] || [[ ${#PROTECTED_UDP_PORTS[@]} -gt 0 ]]; then
+        print_status "$GREEN" "PROTECTED PORTS:"
+        for port in "${PROTECTED_TCP_PORTS[@]}"; do
+            print_status "$GREEN" "  - TCP/$port is protected and accessible"
+        done
+        for port in "${PROTECTED_UDP_PORTS[@]}"; do
+            print_status "$GREEN" "  - UDP/$port is protected and accessible"
+        done
+    fi
+    
+    if [[ ${#PROTECTED_SERVICES[@]} -gt 0 ]]; then
+        print_status "$GREEN" "PROTECTED SERVICES:"
+        for service in "${PROTECTED_SERVICES[@]}"; do
+            print_status "$GREEN" "  - $service is protected from interference"
+        done
+    fi
+    
+    if [[ ${#BLUE_TEAM_NETWORKS[@]} -gt 0 ]]; then
+        print_status "$GREEN" "BLUE TEAM NETWORKS:"
+        for network in "${BLUE_TEAM_NETWORKS[@]}"; do
+            print_status "$GREEN" "  - $network has full access"
+        done
+    fi
+    
+    log_success "CTF VM security hardening completed with custom protections"
 }
 
 # Execute main function
